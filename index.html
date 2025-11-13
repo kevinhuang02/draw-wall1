@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <title>多人畫畫</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { text-align: center; background: #fafafa; }
+    canvas { border: 1px solid #ccc; touch-action: none; }
+  </style>
+</head>
+<body>
+  <h2>🎨 手機畫畫區</h2>
+  <canvas id="draw" width="400" height="400"></canvas>
+
+  <script src="script.js"></script>
+  <script>
+    const canvas = document.getElementById("draw");
+    const ctx = canvas.getContext("2d");
+    let drawing = false;
+
+    canvas.addEventListener("pointerdown", e => { drawing = true; draw(e); });
+    canvas.addEventListener("pointermove", e => { if (drawing) draw(e); });
+    canvas.addEventListener("pointerup", () => drawing = false);
+
+    function draw(e) {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(x, y, 4, 4);
+      ws.send(JSON.stringify({ type: "draw", x, y }));
+    }
+  </script>
+</body>
+</html>
+
