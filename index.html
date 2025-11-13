@@ -1,37 +1,174 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-TW">
 <head>
-  <meta charset="UTF-8" />
-  <title>多人畫畫</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { text-align: center; background: #fafafa; }
-    canvas { border: 1px solid #ccc; touch-action: none; }
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>多人畫畫（Collaborative Draw）</title>
+<style>
+  html,body {
+    height:100%; margin:0; background:#222; color:#fff;
+    font-family: sans-serif;
+  }
+  #canvas {
+    touch-action: none;
+    display:block;
+    width:100%;
+    height: calc(100vh - 64px);
+    background:#fff;
+  }
+  header {
+    height:64px; display:flex; gap:8px; align-items:center;
+    padding:8px; background:#111; color:#fff;
+  }
+  .controls {margin-left:auto;}
+  button {padding:6px 10px;}
+</style>
 </head>
 <body>
-  <h2>🎨 手機畫畫區</h2>
-  <canvas id="draw" width="400" height="400"></canvas>
+<header>
+  <div>Room: <span id="roomLabel"></span></div>
+  <div class="controls">
+    <input id="color" type="color" value="#000000"/>
+    <input id="width" type="range" min="1" max="30" value="4"/>
+    <button id="clearBtn">清除</button>
+  </div>
+</header>
 
-  <script src="script.js"></script>
-  <script>
-    const canvas = document.getElementById("draw");
-    const ctx = canvas.getContext("2d");
-    let drawing = false;
+<canvas id="canvas"></canvas>
 
-    canvas.addEventListener("pointerdown", e => { drawing = true; draw(e); });
-    canvas.addEventListener("pointermove", e => { if (drawing) draw(e); });
-    canvas.addEventListener("pointerup", () => drawing = false);
+<script>
+const params = new URLSearchParams(location.search);
+const room = params.get('room') || 'default';
+const name = params.get('name') || 'guest' + Math.floor(Math.random()*1000);
+document.getElementById('roomLabel').textContent = room;
 
-    function draw(e) {
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      ctx.fillStyle = "#000";
-      ctx.fillRect(x, y, 4, 4);
-      ws.send(JSON.stringify({ type: "draw", x, y }));
-    }
-  </script>
+const ws = new WebSocket(`${location.protocol.replace('http','ws')}//${location.host}/ws/${encodeURIComponent(room)}?name=${encodeURIComponent(name)}`);
+ws.addEventListener('open', ()=> {
+  ws.send(JSON.stringify({type:'join', user: name}));
+});
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: false });
+
+function resize(){
+  canvas.width = Math.floor(window.innerWidth * devicePixelRatio);
+  canvas.height = Math.floor((window.innerHeight - 64) * devicePixelRatio);
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = (window.innerHeight - 64) + 'px';
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+}
+resize();
+window.addEventListener('resize', resize);
+
+let drawing = false;
+let currentStrokeId = null;
+const colorInput = document.getElementById('color');
+const widthInput = document.getElementById('width');
+
+function getPos(e){
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX ?? e.touches[0].clientX) - rect.left;
+  const y = (e.clientY ?? e.touches[0].clientY) - rect.top;
+  return { x, y };
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  drawing = true;
+  currentStrokeId = Math.random().toString(36).slice(2,9);
+  const p = getPos(e);
+  const msg = {
+    type:'begin',
+    x: p.x, y: p.y,
+    color: colorInput.value,
+    width: parseFloat(widthInput.value),
+    stroke_id: currentStrokeId,
+    user: name
+  };
+  ws.send(JSON.stringify(msg));
+  drawBegin(msg, true);
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!drawing) return;
+  e.preventDefault();
+  const p = getPos(e);
+  const msg = { type:'draw', x:p.x, y:p.y, stroke_id: currentStrokeId };
+  ws.send(JSON.stringify(msg));
+  drawPoint(msg, true);
+});
+
+window.addEventListener('pointerup', (e) => {
+  if (!drawing) return;
+  drawing = false;
+  ws.send(JSON.stringify({type:'end', stroke_id: currentStrokeId}));
+  currentStrokeId = null;
+});
+
+// --- 繪圖資料結構 ---
+const strokes = {}; // stroke_id -> {last:{x,y}, color, width}
+
+function drawBegin(msg, local=false){
+  strokes[msg.stroke_id] = { last: {x: msg.x, y: msg.y}, color: msg.color, width: msg.width };
+  ctx.beginPath();
+  ctx.moveTo(msg.x, msg.y);
+  ctx.lineWidth = msg.width;
+  ctx.strokeStyle = msg.color;
+  ctx.lineTo(msg.x + 0.1, msg.y + 0.1);
+  ctx.stroke();
+}
+
+function drawPoint(msg, local=false){
+  const s = strokes[msg.stroke_id];
+  if (!s) return;
+  ctx.beginPath();
+  ctx.lineWidth = s.width;
+  ctx.strokeStyle = s.color;
+  ctx.moveTo(s.last.x, s.last.y);
+  ctx.lineTo(msg.x, msg.y);
+  ctx.stroke();
+  s.last.x = msg.x; s.last.y = msg.y;
+}
+
+function endStroke(msg){
+  delete strokes[msg.stroke_id];
+}
+
+ws.addEventListener('message', (ev) => {
+  try {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'begin') drawBegin(msg, false);
+    else if (msg.type === 'draw') drawPoint(msg, false);
+    else if (msg.type === 'end') endStroke(msg);
+    else if (msg.type === 'clear') clearCanvas();
+  } catch(e){ console.error(e); }
+});
+
+function clearCanvas(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+}
+
+document.getElementById('clearBtn').onclick = () => {
+  ws.send(JSON.stringify({type:'clear', user: name}));
+  clearCanvas();
+};
+
+// --- 簡化繪圖功能（來自第二份程式碼） ---
+canvas.addEventListener("pointerdown", e => { if (!drawing) drawSimple(e); });
+canvas.addEventListener("pointermove", e => { if (drawing) drawSimple(e); });
+canvas.addEventListener("pointerup", () => drawing = false);
+
+function drawSimple(e) {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  ctx.fillStyle = colorInput.value;
+  ctx.fillRect(x, y, parseFloat(widthInput.value), parseFloat(widthInput.value));
+}
+</script>
 </body>
 </html>
+
 
