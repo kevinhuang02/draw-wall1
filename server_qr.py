@@ -9,6 +9,13 @@ import asyncio
 import socket
 import tempfile
 import qrcode
+from typing import Dict
+
+from dotenv import load_dotenv
+
+# ---------- Load environment variables ----------
+load_dotenv()  # 讀取 .env 檔案
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
@@ -23,16 +30,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+
+if os.path.exists(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+else:
+    logger.warning(f"找不到 static 資料夾：{STATIC_DIR}")
+    logger.warning("⚠ Render 可能忽略空資料夾，請確保你在 GitHub 中有上傳 static/.keep 或 static/index.html")
 
 # ---------- AI 客戶端 ----------
 try:
-    from openai import AsyncOpenAI
-    client = AsyncOpenAI()
-    logger.info("OpenAI client initialized.")
+    if OPENAI_API_KEY:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        logger.info("OpenAI client initialized with API key from environment.")
+    else:
+        client = None
+        logger.warning("⚠️ OPENAI_API_KEY 未設定，AI 主題功能停用")
 except Exception:
     client = None
-    logger.warning("⚠️ 未安裝 openai 或未設定 API key，AI 主題功能停用")
+    logger.warning("⚠️ 未安裝 openai，AI 主題功能停用")
 
 # ---------- 全域狀態 ----------
 rooms: dict[str, set[WebSocket]] = {}
@@ -97,6 +116,28 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             if not rooms[room_id]:
                 del rooms[room_id]
 
+# ---------- WebSocket 管理 ----------
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+        logger.info(f"✅ {client_id} 已連線")
+
+    def disconnect(self, client_id: str):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+            logger.info(f"❌ {client_id} 已離線")
+
+    async def broadcast(self, message: str, sender_id: str):
+        for client_id, ws in self.active_connections.items():
+            if client_id != sender_id:
+                await ws.send_text(message)
+
+manager = ConnectionManager()
+
 # ---------- HTTP 端點 ----------
 @app.get("/")
 async def root():
@@ -118,6 +159,26 @@ def get_local_ip():
     finally:
         s.close()
     return ip
+
+# ---------- WebSocket 路由 ----------
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint_client(websocket: WebSocket, client_id: str):
+    await manager.connect(websocket, client_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await manager.broadcast(data, client_id)
+    except WebSocketDisconnect:
+        manager.disconnect(client_id)
+
+# ---------- QRCode API ----------
+@app.get("/qr/{text}")
+def generate_qr(text: str):
+    img = qrcode.make(text)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png", dir=STATIC_DIR if os.path.exists(STATIC_DIR) else None)
+    img.save(tmp.name)
+    filename = os.path.basename(tmp.name)
+    return {"url": f"/static/{filename}"}
 
 # ---------- QR Code 生成 ----------
 def show_qr_code(room="room1"):
@@ -149,6 +210,7 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     logger.info(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
